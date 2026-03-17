@@ -139,6 +139,11 @@ struct TabBarView: View {
                             Color.clear
                                 .frame(width: trailing, height: TabBarMetrics.tabHeight)
                                 .contentShape(Rectangle())
+                                .background(
+                                    EmptyTabBarDoubleClickMonitorView {
+                                        controller.requestNewTab(kind: "terminal", inPane: pane.id)
+                                    }
+                                )
                                 .onDrop(of: [.tabTransfer], delegate: TabDropDelegate(
                                     targetIndex: pane.tabs.count,
                                     pane: pane,
@@ -413,6 +418,11 @@ struct TabBarView: View {
             .fill(Color.clear)
             .frame(width: 30, height: TabBarMetrics.tabHeight)
             .contentShape(Rectangle())
+            .background(
+                EmptyTabBarDoubleClickMonitorView {
+                    controller.requestNewTab(kind: "terminal", inPane: pane.id)
+                }
+            )
             .onDrop(of: [.tabTransfer], delegate: TabDropDelegate(
                 targetIndex: pane.tabs.count,
                 pane: pane,
@@ -565,6 +575,53 @@ private struct SplitActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(TabBarColors.splitActionIcon(for: appearance, isPressed: configuration.isPressed))
+    }
+}
+
+private struct EmptyTabBarDoubleClickMonitorView: NSViewRepresentable {
+    let onDoubleClick: () -> Void
+
+    final class Coordinator {
+        var onDoubleClick: (() -> Void)?
+        weak var view: NSView?
+        var monitor: Any?
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+
+        context.coordinator.view = view
+        context.coordinator.onDoubleClick = onDoubleClick
+
+        let coordinator = context.coordinator
+        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak coordinator] event in
+            guard event.clickCount >= 2 else { return event }
+            guard let coordinator, let view = coordinator.view, let window = view.window else { return event }
+            guard event.window === window else { return event }
+
+            let point = view.convert(event.locationInWindow, from: nil)
+            guard view.bounds.contains(point) else { return event }
+
+            coordinator.onDoubleClick?()
+            return nil
+        }
+
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.view = nsView
+        context.coordinator.onDoubleClick = onDoubleClick
     }
 }
 
