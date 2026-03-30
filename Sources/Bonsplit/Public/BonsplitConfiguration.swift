@@ -105,6 +105,7 @@ extension BonsplitConfiguration {
     public struct SplitButtonTooltips: Sendable, Equatable {
         public var newTerminal: String
         public var newBrowser: String
+        public var newVSCode: String
         public var splitRight: String
         public var splitDown: String
 
@@ -113,11 +114,13 @@ extension BonsplitConfiguration {
         public init(
             newTerminal: String = "New Terminal",
             newBrowser: String = "New Browser",
+            newVSCode: String = "New VS Code",
             splitRight: String = "Split Right",
             splitDown: String = "Split Down"
         ) {
             self.newTerminal = newTerminal
             self.newBrowser = newBrowser
+            self.newVSCode = newVSCode
             self.splitRight = splitRight
             self.splitDown = splitDown
         }

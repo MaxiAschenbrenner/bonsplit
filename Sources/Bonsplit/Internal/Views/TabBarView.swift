@@ -489,6 +489,15 @@ struct TabBarView: View {
             .safeHelp(tooltips.newBrowser)
 
             Button {
+                controller.requestNewTab(kind: "vscode", inPane: pane.id)
+            } label: {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(SplitActionButtonStyle(appearance: appearance))
+            .safeHelp(tooltips.newVSCode)
+
+            Button {
                 // 120fps animation handled by SplitAnimator
                 controller.splitPane(pane.id, orientation: .horizontal)
             } label: {
