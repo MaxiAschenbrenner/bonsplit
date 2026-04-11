@@ -66,6 +66,7 @@ struct TabBarView: View {
     var showSplitButtons: Bool = true
 
     @AppStorage("workspacePresentationMode") private var presentationMode = "standard"
+    @AppStorage("debugFadeColorStyle") private var fadeColorStyle = 0
     @State private var isHoveringTabBar = false
     @State private var dropTargetIndex: Int?
     @State private var dropLifecycle: TabDropLifecycle = .idle
@@ -80,7 +81,10 @@ struct TabBarView: View {
     }
 
     private var canScrollRight: Bool {
-        contentWidth > containerWidth && scrollOffset < contentWidth - containerWidth - 1
+        // contentWidth includes the 30pt drop zone after tabs.
+        let tabsWidth = contentWidth - 30
+        guard tabsWidth > containerWidth + 4 else { return false }
+        return scrollOffset < tabsWidth - containerWidth
     }
 
     /// Whether this tab bar should show full saturation (focused or drag source)
@@ -117,14 +121,11 @@ struct TabBarView: View {
                                     .id(tab.id)
                             }
 
-                            // Unified drop zone after the last tab. This is at least a small hit
-                            // target (so the user can always drop "after the last tab") and it
-                            // supports dropping after the last tab.
+                            // Unified drop zone after the last tab.
                             dropZoneAfterTabs
                         }
                         .padding(.horizontal, TabBarMetrics.barPadding)
-                        // Keep tab insert/remove/reorder instant without suppressing unrelated
-                        // subtree animations (for example, shortcut-hint fades).
+                        .padding(.trailing, showSplitButtons ? 114 : 0)
                         .animation(nil, value: pane.tabs.map(\.id))
                         .background(
                             GeometryReader { contentGeo in
@@ -174,8 +175,6 @@ struct TabBarView: View {
                     }
                     .onChange(of: pane.selectedTabId) { _, newTabId in
                         if let tabId = newTabId {
-                            // Keep tab selection changes instant; scrolling to the focused tab should
-                            // not animate (avoids feeling like tabs "linger" during drag/drop).
                             withTransaction(Transaction(animation: nil)) {
                                 proxy.scrollTo(tabId, anchor: .center)
                             }
@@ -183,17 +182,43 @@ struct TabBarView: View {
                     }
                 }
                 .frame(height: TabBarMetrics.barHeight)
-                .overlay(fadeOverlays)
-            }
+                .mask(combinedMask)
+                // Split buttons sit on top of the tab strip in their own opaque backdrop.
+                // The backdrop visually obscures any tabs that scroll under the buttons,
+                // and (critically) does not break hit testing on tabs outside the backdrop —
+                // unlike the prior approach of using a `Color.clear` region in `combinedMask`,
+                // which silently blocked SwiftUI hit tests in the masked-out area and let
+                // tab clicks fall through to `TabBarDragAndHoverView` (which performs a
+                // window drag in minimal mode).
+                .overlay(alignment: .trailing) {
+                    if showSplitButtons {
+                        let shouldShow = presentationMode != "minimal" || isHoveringTabBar
+                        let backdropColor = Color(nsColor: Self.buttonBackdropColor(
+                            for: appearance,
+                            focused: isFocused,
+                            style: fadeColorStyle
+                        ))
+                        ZStack(alignment: .trailing) {
+                            HStack(spacing: 0) {
+                                LinearGradient(
+                                    colors: [backdropColor.opacity(0), backdropColor],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                                .frame(width: 24)
+                                Rectangle().fill(backdropColor)
+                            }
+                            .frame(width: 114)
 
-            // Split buttons
-            if showSplitButtons {
-                let shouldShow = presentationMode != "minimal" || isHoveringTabBar
-                splitButtons
-                    .saturation(tabBarSaturation)
-                    .opacity(shouldShow ? 1 : 0)
-                    .allowsHitTesting(shouldShow)
-                    .animation(.easeInOut(duration: 0.14), value: shouldShow)
+                            splitButtons
+                                .saturation(tabBarSaturation)
+                        }
+                        .padding(.bottom, 1)
+                        .opacity(shouldShow ? 1 : 0)
+                        .allowsHitTesting(shouldShow)
+                        .animation(.easeInOut(duration: 0.14), value: shouldShow)
+                    }
+                }
             }
         }
         .frame(height: TabBarMetrics.barHeight)
@@ -517,43 +542,109 @@ struct TabBarView: View {
             .buttonStyle(SplitActionButtonStyle(appearance: appearance))
             .safeHelp(tooltips.splitDown)
         }
+        .padding(.leading, 6)
         .padding(.trailing, 8)
+    }
+
+
+    private static func buttonBackdropColor(
+        for appearance: BonsplitConfiguration.Appearance,
+        focused: Bool,
+        style: Int
+    ) -> NSColor {
+        switch style {
+        case 1: // raw paneBackground forced opaque
+            return TabBarColors.nsColorPaneBackground(for: appearance).withAlphaComponent(1.0)
+        case 2: // barBackground (tab bar chrome)
+            let c = NSColor(TabBarColors.barBackground(for: appearance))
+            return (c.usingColorSpace(.sRGB) ?? c).withAlphaComponent(1.0)
+        case 3: // windowBackgroundColor
+            return NSColor.windowBackgroundColor.withAlphaComponent(1.0)
+        case 4: // controlBackgroundColor
+            return NSColor.controlBackgroundColor.withAlphaComponent(1.0)
+        case 5: // pre-composited barBackground over windowBg
+            let chrome = NSColor(TabBarColors.barBackground(for: appearance))
+            let winBg = NSColor.windowBackgroundColor
+            guard let fg = chrome.usingColorSpace(.sRGB),
+                  let bk = winBg.usingColorSpace(.sRGB) else {
+                return chrome.withAlphaComponent(1.0)
+            }
+            let a: CGFloat = focused ? fg.alphaComponent : fg.alphaComponent * 0.95
+            let oneMinusA = 1.0 - a
+            let r = fg.redComponent * a + bk.redComponent * oneMinusA
+            let g = fg.greenComponent * a + bk.greenComponent * oneMinusA
+            let b = fg.blueComponent * a + bk.blueComponent * oneMinusA
+            return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+        default: // 0: pre-composited paneBackground over windowBg
+            return precompositedPaneBackground(for: appearance, focused: focused)
+        }
+    }
+
+    /// Pre-composite the pane background over the window background to produce
+    /// a flat opaque color that matches what .background(barFill) looks like
+    /// after compositing. Avoids double-compositing mismatch on overlays.
+    private static func precompositedPaneBackground(
+        for appearance: BonsplitConfiguration.Appearance,
+        focused: Bool
+    ) -> NSColor {
+        let chrome = TabBarColors.nsColorPaneBackground(for: appearance)
+        let winBg = NSColor.windowBackgroundColor
+        guard let fg = chrome.usingColorSpace(.sRGB),
+              let bk = winBg.usingColorSpace(.sRGB) else {
+            return chrome.withAlphaComponent(1.0)
+        }
+        let a: CGFloat = focused ? fg.alphaComponent : fg.alphaComponent * 0.95
+        let oneMinusA = 1.0 - a
+        let r = fg.redComponent * a + bk.redComponent * oneMinusA
+        let g = fg.greenComponent * a + bk.greenComponent * oneMinusA
+        let b = fg.blueComponent * a + bk.blueComponent * oneMinusA
+        return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+    }
+
+    // MARK: - Combined Mask (scroll fades + button area)
+    //
+    // IMPORTANT: SwiftUI's `.mask()` with `Color.clear` regions blocks hit testing on the
+    // masked content in those regions. Previously this mask used a 90pt clear region at the
+    // trailing edge to hide tabs under the split buttons; that caused clicks on tabs in that
+    // 90pt area to fall through the masked ScrollView to the `TabBarDragAndHoverView`
+    // background, which (in minimal mode) interpreted the click as a window drag instead
+    // of a tab tap. Keep the entire mask opaque so hit testing works on every tab; the split
+    // buttons' opaque backdrop (rendered in the splitButtons overlay) handles the visual
+    // obscuring of tabs underneath.
+
+    @ViewBuilder
+    private var combinedMask: some View {
+        let fadeWidth: CGFloat = 24
+        HStack(spacing: 0) {
+            // Left scroll fade
+            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                .frame(width: canScrollLeft ? fadeWidth : 0)
+
+            // Visible content area (always opaque so hit testing reaches the tabs)
+            Rectangle().fill(Color.black)
+
+            // Right scroll fade only when scroll content actually overflows.
+            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                .frame(width: canScrollRight ? fadeWidth : 0)
+        }
     }
 
     // MARK: - Fade Overlays
 
+    /// Mask that fades scroll content at the edges instead of overlaying
+    /// a colored gradient. The mask uses black (visible) → clear (hidden),
+    /// so the tab bar background shows through naturally with no compositing.
     @ViewBuilder
     private var fadeOverlays: some View {
         let fadeWidth: CGFloat = 24
-
         HStack(spacing: 0) {
-            // Left fade
-            LinearGradient(
-                colors: [
-                    TabBarColors.barBackground(for: appearance),
-                    TabBarColors.barBackground(for: appearance).opacity(0),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: fadeWidth)
-            .opacity(canScrollLeft ? 1 : 0)
-            .allowsHitTesting(false)
+            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing)
+                .frame(width: canScrollLeft ? fadeWidth : 0)
 
-            Spacer()
+            Rectangle().fill(Color.black)
 
-            // Right fade
-            LinearGradient(
-                colors: [
-                    TabBarColors.barBackground(for: appearance).opacity(0),
-                    TabBarColors.barBackground(for: appearance),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: fadeWidth)
-            .opacity(canScrollRight ? 1 : 0)
-            .allowsHitTesting(false)
+            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                .frame(width: canScrollRight ? fadeWidth : 0)
         }
     }
 
@@ -652,6 +743,9 @@ private struct TabBarDragAndHoverView: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
+#if DEBUG
+            dlog("tab.bar.bg.mouseDown isMinimal=\(isMinimalMode ? 1 : 0) clickCount=\(event.clickCount)")
+#endif
             guard isMinimalMode, let window else {
                 super.mouseDown(with: event)
                 return
@@ -699,6 +793,10 @@ private struct TabBarDragZoneView: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
+#if DEBUG
+            let isMinimal = UserDefaults.standard.string(forKey: "workspacePresentationMode") == "minimal"
+            dlog("tab.bar.dragZone.mouseDown isMinimal=\(isMinimal ? 1 : 0) clickCount=\(event.clickCount)")
+#endif
             guard let window = self.window else {
                 super.mouseDown(with: event)
                 return
@@ -815,7 +913,11 @@ enum TabControlShortcutHintPolicy {
         let flags = modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.numericPad, .function, .capsLock])
         let shortcut = TabControlShortcutSettings.surfaceByNumberShortcut(defaults: defaults)
-        guard flags == shortcut.modifierFlags else { return nil }
+        if flags != shortcut.modifierFlags {
+            // Command-only hold reveals all hints (including pane hints), while
+            // control (or other modifiers) remains strict to the pane shortcut.
+            guard flags == [.command] else { return nil }
+        }
         return TabControlShortcutModifier(
             modifierFlags: shortcut.modifierFlags,
             symbol: shortcut.modifierSymbol
